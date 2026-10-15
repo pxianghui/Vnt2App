@@ -356,7 +356,11 @@ class VntManager {
   Future<void> remove(String key) async {
     var vnt = map.remove(key);
     if (vnt != null) {
-      await vnt.close();
+      try {
+        await vnt.close();
+      } catch (e) {
+        debugPrint('关闭连接异常: $e');
+      }
     }
     // 更新磁贴和小组件状态
     if (Platform.isAndroid) {
@@ -365,10 +369,20 @@ class VntManager {
   }
 
   Future<void> removeAll() async {
-    for (var element in map.entries) {
-      await element.value.close();
-    }
+    // 必须先快照并清空，再逐个关闭。
+    // 因为 close() 内部会触发 stopVpn() -> stopVnt() -> removeAll() 重入，
+    // 若在此处边遍历 map.entries 边等 close()，嵌套调用执行 map.clear()
+    // 会让外层迭代抛 "Concurrent modification during iteration"，
+    // 导致下面的 updateWidgetAndTile 不执行、通知栏卡在"已连接"（实际已断开）。
+    final boxes = map.values.toList();
     map.clear();
+    for (var box in boxes) {
+      try {
+        await box.close();
+      } catch (e) {
+        debugPrint('关闭连接异常: $e');
+      }
+    }
     // 更新磁贴和小组件状态
     if (Platform.isAndroid) {
       VntAppCall.updateWidgetAndTile(false);
