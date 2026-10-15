@@ -277,8 +277,8 @@ public class FlutterMethodChannel {
         // 更新小组件状态
         VntWidget.updateAllWidgets(context);
 
-        // 更新常驻通知
-        VntNotificationService.updateNotification(context);
+        // 更新常驻通知（直接采用推送状态，避免回查 RPC 造成误判）
+        VntNotificationService.updateNotification(context, isConnected);
     }
 
     public interface Callback {

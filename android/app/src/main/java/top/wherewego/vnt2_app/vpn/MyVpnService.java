@@ -71,7 +71,7 @@ public class MyVpnService extends VpnService {
         if (vpnService != null) {
             VntWidget.updateAllWidgets(vpnService);
             // 更新通知栏状态
-            top.wherewego.vnt2_app.VntNotificationService.updateNotification(vpnService);
+            top.wherewego.vnt2_app.VntNotificationService.updateNotification(vpnService, false);
         }
         FlutterMethodChannel.stopVnt();
         if (vpnService != null) {

@@ -138,7 +138,7 @@ public class MyTileService extends TileService {
                 }
                 tile.updateTile();
                 // 更新通知栏状态
-                VntNotificationService.updateNotification(getApplicationContext());
+                VntNotificationService.updateNotification(getApplicationContext(), isRunning);
                 // 更新小组件状态
                 VntWidget.updateAllWidgets(getApplicationContext());
                 return null;
@@ -152,7 +152,7 @@ public class MyTileService extends TileService {
             Log.i("Tile", "当前已连接，调用 stopVnt");
             FlutterMethodChannel.stopVnt();
             // 更新通知栏状态
-            VntNotificationService.updateNotification(getApplicationContext());
+            VntNotificationService.updateNotification(getApplicationContext(), false);
             // 更新小组件状态
             VntWidget.updateAllWidgets(getApplicationContext());
         }

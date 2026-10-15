@@ -135,8 +135,10 @@ public class MainActivity extends FlutterActivity {
             }
         });
 
-        // Flutter 初始化完成后，立即更新通知服务状态
-        VntNotificationService.updateNotification(this);
+        // Flutter 初始化完成后，立即刷新通知服务状态。
+        // 传 null 表示沿用服务内已缓存的连接状态：此时 Dart handler 刚注册，
+        // 异步回查结果还没回来，若按"未连接"下发会把已连接的通知误刷成未连接。
+        VntNotificationService.updateNotification(this, (Boolean) null);
         AndroidChatAudioBridge.init(flutterEngine, this);
 
         // File Channel - 用于文件保存

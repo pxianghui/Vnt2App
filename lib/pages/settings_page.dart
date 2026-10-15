@@ -478,7 +478,7 @@ class _SettingsPageState extends State<SettingsPage> {
         // 通知配置列表页面刷新
         widget.onDataChanged?.call();
         // 同步更新通知栏、磁贴、小组件（恢复备份会重置默认配置）
-        VntAppCall.updateWidgetAndTile(false);
+        VntAppCall.updateWidgetAndTile(vntManager.hasConnection());
         // 更新系统托盘（配置列表变化）
         SystemTrayManager().updateMenu();
       }
@@ -964,7 +964,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     });
                     _dataPersistence.saveDefaultKey(newValue);
                     // 更新通知栏、磁贴、小组件显示最新配置
-                    VntAppCall.updateWidgetAndTile(false);
+                    VntAppCall.updateWidgetAndTile(vntManager.hasConnection());
                     // 更新系统托盘（默认配置变化）
                     SystemTrayManager().updateMenu();
                   }

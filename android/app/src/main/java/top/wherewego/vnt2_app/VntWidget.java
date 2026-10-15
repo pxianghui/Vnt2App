@@ -72,7 +72,7 @@ public abstract class VntWidget extends AppWidgetProvider {
                 // 执行断开操作
                 FlutterMethodChannel.stopVnt();
                 // 更新通知栏状态
-                VntNotificationService.updateNotification(context);
+                VntNotificationService.updateNotification(context, false);
                 // 更新磁贴状态
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
                     MyTileService.setState(false);
@@ -93,7 +93,7 @@ public abstract class VntWidget extends AppWidgetProvider {
                         updateAllWidgetsWithState(context, false);
                     }
                     // 更新通知栏状态
-                    VntNotificationService.updateNotification(context);
+                    VntNotificationService.updateNotification(context, success);
                     // 更新磁贴状态
                     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
                         MyTileService.setState(success);

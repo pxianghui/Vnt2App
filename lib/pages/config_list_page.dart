@@ -754,7 +754,8 @@ class _ConfigListPageState extends State<ConfigListPage> {
       // 通知设置页面刷新配置列表
       widget.onDataChanged?.call();
       // 同步更新通知栏、磁贴、小组件（新建/编辑可能影响默认配置）
-      VntAppCall.updateWidgetAndTile(false);
+      // 注意：必须传真实连接状态，连接中传 false 会把通知误刷成"未连接"
+      VntAppCall.updateWidgetAndTile(vntManager.hasConnection());
       // 更新系统托盘（配置列表变化）
       SystemTrayManager().updateMenu();
     }
@@ -1226,7 +1227,7 @@ class _ConfigListPageState extends State<ConfigListPage> {
           // 重新加载配置列表以实时显示导入的配置
           await _loadConfigs();
           // 同步更新通知栏、磁贴、小组件（导入可能影响默认配置）
-          VntAppCall.updateWidgetAndTile(false);
+          VntAppCall.updateWidgetAndTile(vntManager.hasConnection());
           // 更新系统托盘（配置列表变化）
           SystemTrayManager().updateMenu();
         }
@@ -1289,7 +1290,7 @@ class _ConfigListPageState extends State<ConfigListPage> {
               // 通知设置页面刷新配置列表
               widget.onDataChanged?.call();
               // 同步更新通知栏、磁贴、小组件（删除可能影响默认配置）
-              VntAppCall.updateWidgetAndTile(false);
+              VntAppCall.updateWidgetAndTile(vntManager.hasConnection());
               // 更新系统托盘（配置列表变化）
               SystemTrayManager().updateMenu();
             },
