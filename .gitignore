@@ -9,6 +9,9 @@
 .history
 .svn/
 migrate_working_dir/
+# 本地抓取的运行日志，不上传
+vnt_logs_*.txt
+.caplog/
 
 # IntelliJ related
 *.iml
