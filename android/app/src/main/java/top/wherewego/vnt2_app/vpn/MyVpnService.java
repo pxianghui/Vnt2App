@@ -10,8 +10,6 @@ import android.os.ParcelFileDescriptor;
 import android.system.OsConstants;
 import android.util.Log;
 
-import java.io.IOException;
-
 import io.flutter.plugin.common.MethodChannel;
 import top.wherewego.vnt2_app.FlutterMethodChannel;
 import top.wherewego.vnt2_app.MainActivity;
@@ -73,30 +71,16 @@ public class MyVpnService extends VpnService {
             // 更新通知栏状态
             top.wherewego.vnt2_app.VntNotificationService.updateNotification(vpnService, false);
         }
+        // 通知 Dart 侧停止，Rust 会 drop OwnedFd 关闭 tun fd
         FlutterMethodChannel.stopVnt();
         if (vpnService != null) {
             vpnService.stopSelf();
         }
-        if (vpnInterface != null) {
-            try {
-                vpnInterface.close();
-            } catch (IOException e) {
-                Log.e(TAG, "Error closing existing VPN interface", e);
-            }
-        }
+        // 不再手动关闭 tun fd：所有权已通过 detachFd 交给 Rust，
+        // Java 侧再次 close 会触发 fdsan 二次关闭崩溃
     }
 
     private int startVpn(DeviceConfig config) throws PackageManager.NameNotFoundException {
-        // 先关闭可能存在的旧 VPN 接口
-        if (vpnInterface != null) {
-            try {
-                vpnInterface.close();
-                vpnInterface = null;
-            } catch (IOException e) {
-                Log.e(TAG, "Error closing old VPN interface", e);
-            }
-        }
-        
         Builder builder = new Builder();
         String ip = IpUtils.intToIpAddress(config.virtualIp);
         int prefixLength = IpUtils.subnetMaskToPrefixLength(config.virtualNetmask);
@@ -131,7 +115,15 @@ public class MyVpnService extends VpnService {
             Log.e(TAG, "Error establishing VPN interface", e);
             throw e;
         }
-        return vpnInterface.getFd();
+
+        // 关键：把 tun fd 的所有权移交 Rust。
+        // vnt-core 用 OwnedFd::from_raw_fd 接管并负责关闭该 fd
+        // （见 rust/src/api/vnt_api.rs 的 generate_tun 分支）。
+        // 若这里只返回 getFd()，fd 仍归 ParcelFileDescriptor 所有，
+        // Rust 关闭时会触发 Android fdsan 校验失败（SIGABRT），表现为断开必崩。
+        int fd = vpnInterface.detachFd();
+        vpnInterface = null;
+        return fd;
     }
 
     @Override
