@@ -15,7 +15,6 @@ import android.graphics.BitmapFactory;
 import android.os.Build;
 import android.os.IBinder;
 import android.util.Log;
-import android.widget.RemoteViews;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
@@ -29,13 +28,16 @@ import org.json.JSONObject;
  */
 public class VntNotificationService extends Service {
     private static final String TAG = "VntNotificationService";
-    private static final String CHANNEL_ID = "vnt_notification_channel";
+    // NotificationChannel 的 importance 创建后不可修改，且旧的 vnt_notification_channel
+    // 是 IMPORTANCE_LOW，会被 Flyme 归入"不重要通知"，折叠态下自定义按钮不生效。
+    // 因此换到新 id 并用默认重要性重建，同时删除旧渠道。
+    private static final String CHANNEL_ID = "vnt_notification_channel_v2";
+    private static final String LEGACY_CHANNEL_ID = "vnt_notification_channel";
     private static final int NOTIFICATION_ID = 1001;
 
     // 通知动作
     private static final String ACTION_TOGGLE = "top.wherewego.vnt2_app.NOTIFICATION_TOGGLE";
     private static final String ACTION_UPDATE = "top.wherewego.vnt2_app.NOTIFICATION_UPDATE";
-    private static final String ACTION_DISMISS = "top.wherewego.vnt2_app.NOTIFICATION_DISMISS";
 
     // SharedPreferences 相关
     private static final String PREFS_NAME = "FlutterSharedPreferences";
@@ -83,11 +85,6 @@ public class VntNotificationService extends Service {
             Notification notification = buildNotification();
             if (notification != null) {
                 startForeground(NOTIFICATION_ID, notification);
-                if (!isConnected) {
-                    // 未连接时解除前台状态：通知降级为普通通知，可以划掉
-                    detachForeground();
-                    Log.i(TAG, "未连接状态，通知已设为可划掉");
-                }
                 Log.i(TAG, "前台服务启动成功: isConnected=" + isConnected);
             } else {
                 Log.e(TAG, "通知创建失败，无法启动前台服务");
@@ -117,19 +114,6 @@ public class VntNotificationService extends Service {
             return START_STICKY;
         }
 
-        // 用户划掉了未连接状态的通知：移除通知并停止服务，不再重新弹出
-        if (intent != null && ACTION_DISMISS.equals(intent.getAction())) {
-            Log.i(TAG, "通知被划掉，停止通知服务");
-            isConnected = false;
-            lastKnownConnected = false;
-            detachForeground();
-            if (notificationManager != null) {
-                notificationManager.cancel(NOTIFICATION_ID);
-            }
-            stopSelf();
-            return START_NOT_STICKY;
-        }
-
         // 如果 Flutter 已初始化，获取当前连接状态
         if (FlutterMethodChannel.initialized()) {
             updateNotificationFromFlutter();
@@ -143,25 +127,17 @@ public class VntNotificationService extends Service {
         super.onDestroy();
         Log.i(TAG, "VntNotificationService 销毁");
 
-        // 未连接时通知已降级为普通通知，服务销毁后手动清理，避免残留
-        if (!isConnected && notificationManager != null) {
-            notificationManager.cancel(NOTIFICATION_ID);
-        }
-
         // 清除静态实例（保留 lastKnown* 缓存，供 Service 重建时恢复状态）
         instance = null;
     }
 
-    /**
-     * 解除前台服务状态但保留通知：通知从"不可划掉"变为普通通知。
-     * 连接中不调用此方法，保持常驻。
-     */
-    private void detachForeground() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(Service.STOP_FOREGROUND_DETACH);
-        } else {
-            stopForeground(false);
-        }
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        super.onTaskRemoved(rootIntent);
+        // manifest 里 stopWithTask=false，划掉任务不会停服务；
+        // 这里再主动重绘一次，避免部分 ROM 在清理任务时把通知一并丢掉
+        Log.i(TAG, "任务被移除，保持通知服务存活");
+        updateNotification();
     }
 
     @Nullable
@@ -178,14 +154,19 @@ public class VntNotificationService extends Service {
             NotificationChannel channel = new NotificationChannel(
                 CHANNEL_ID,
                 "VNT2 连接状态",
-                NotificationManager.IMPORTANCE_LOW // 低重要性，不会发出声音
+                NotificationManager.IMPORTANCE_DEFAULT // 默认重要性：不再被归入"不重要通知"
             );
             channel.setDescription("显示 VNT2 连接状态和快速切换按钮");
             channel.setShowBadge(false); // 不显示角标
             channel.enableLights(false); // 不显示指示灯
             channel.enableVibration(false); // 不振动
+            channel.setSound(null, null); // 重要性归默认，但保持静音，避免状态更新时反复响铃
 
             notificationManager.createNotificationChannel(channel);
+
+            // 删除旧的 LOW 渠道：渠道一旦创建就无法提升重要性，
+            // 不删除会让用户仍停留在"不重要通知"分组里
+            notificationManager.deleteNotificationChannel(LEGACY_CHANNEL_ID);
         }
     }
 
@@ -222,98 +203,38 @@ public class VntNotificationService extends Service {
                 pendingIntentFlags
             );
 
-            // 划掉通知时的回调：未连接状态允许划掉，划掉后停止服务
-            Intent dismissIntent = new Intent(this, VntNotificationService.class);
-            dismissIntent.setAction(ACTION_DISMISS);
-            PendingIntent dismissPendingIntent = PendingIntent.getService(
-                this,
-                2,  // requestCode=2 用于划掉通知，避免与其他 PendingIntent 冲突
-                dismissIntent,
-                pendingIntentFlags
-            );
-
             Log.d(TAG, "创建 PendingIntent: 使用 getService() 方式，action=" + ACTION_TOGGLE);
 
             // 状态文本
             String statusText = isConnected ? "已连接" : "未连接";
             String description = isConnected ? "已连接到 " + configName : "点击连接到 " + configName;
             int statusColor = isConnected ? 0xFF4CAF50 : 0xFFF44336; // 绿色或红色
+            String buttonText = isConnected ? "断开" : "连接";
 
-            // 尝试使用自定义布局，如果失败则使用标准布局
-            Notification notification = null;
-            try {
-                // 创建自定义通知布局
-                RemoteViews notificationLayout = new RemoteViews(getPackageName(), R.layout.notification_layout);
+            // 统一使用系统标准通知：内容由 SystemUI 渲染，折叠态/收纳态都能正确显示，
+            // 也不会出现自定义 RemoteViews 在反复更新后不再刷新的问题（"点击后显示不变"）
+            NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_stat_icon) // 状态栏图标（使用专门的通知图标）
+                .setContentTitle("VNT2 - " + statusText)
+                .setContentText(description)
+                .setContentIntent(contentIntent)
+                .setOngoing(true) // 常驻，不可划掉
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT) // 与渠道 importance 保持一致
+                .setSilent(true) // 保持静音，避免状态更新时响铃
+                .setOnlyAlertOnce(true) // 同一通知只提醒一次
+                .setShowWhen(false) // 不显示时间
+                .setAutoCancel(false); // 点击后不自动取消
 
-                // 设置状态文本和颜色
-                notificationLayout.setTextViewText(R.id.notification_status, statusText);
-                notificationLayout.setTextColor(R.id.notification_status, statusColor);
-
-                // 设置说明文本
-                notificationLayout.setTextViewText(R.id.notification_description, description);
-                notificationLayout.setTextColor(R.id.notification_description, 0xFF1565C0); // 深蓝色
-
-                // 设置按钮文本和背景
-                String buttonText = isConnected ? "断开" : "连接";
-                int buttonBackground = isConnected ? R.drawable.notification_button_connected : R.drawable.notification_button_disconnected;
-                notificationLayout.setTextViewText(R.id.notification_button, buttonText);
-                notificationLayout.setInt(R.id.notification_button, "setBackgroundResource", buttonBackground);
-
-                // 设置按钮点击事件
-                notificationLayout.setOnClickPendingIntent(R.id.notification_button, togglePendingIntent);
-
-                // 构建通知
-                NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
-                    .setSmallIcon(R.drawable.ic_stat_icon) // 状态栏图标（使用专门的通知图标）
-                    .setContentIntent(contentIntent)
-                    .setCustomContentView(notificationLayout) // 使用自定义布局
-                    .setStyle(new NotificationCompat.DecoratedCustomViewStyle()) // 使用装饰样式
-                    .setOngoing(isConnected) // 仅已连接时常驻不可划掉，未连接可划掉
-                    .setDeleteIntent(dismissPendingIntent) // 划掉后停止服务，避免再次弹出
-                    .setPriority(NotificationCompat.PRIORITY_LOW) // 低优先级
-                    .setShowWhen(false) // 不显示时间
-                    .setAutoCancel(false); // 点击后不自动取消
-
-                // Android 5.0+ 设置通知颜色（影响小图标）
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                    builder.setColor(statusColor);
-                }
-
-                notification = builder.build();
-                Log.d(TAG, "使用自定义布局创建通知成功");
-            } catch (Exception e) {
-                Log.w(TAG, "自定义布局创建失败，使用标准布局: " + e.getMessage());
-                // 降级到标准布局
-                notification = null;
+            // Android 5.0+ 设置通知颜色（影响小图标）
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                builder.setColor(statusColor);
             }
 
-            // 如果自定义布局失败，使用标准布局
-            if (notification == null) {
-                NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
-                    .setSmallIcon(android.R.drawable.ic_dialog_info) // 使用系统图标作为后备
-                    .setContentTitle("VNT2 - " + statusText)
-                    .setContentText(description)
-                    .setContentIntent(contentIntent)
-                    .setOngoing(isConnected) // 仅已连接时常驻不可划掉，未连接可划掉
-                    .setDeleteIntent(dismissPendingIntent) // 划掉后停止服务，避免再次弹出
-                    .setPriority(NotificationCompat.PRIORITY_LOW)
-                    .setShowWhen(false)
-                    .setAutoCancel(false);
+            // 连接/断开按钮：由 SystemUI 渲染，折叠与展开态都可用
+            builder.addAction(R.drawable.ic_stat_icon, buttonText, togglePendingIntent);
 
-                // 添加操作按钮
-                String buttonText = isConnected ? "断开" : "连接";
-                builder.addAction(android.R.drawable.ic_media_play, buttonText, togglePendingIntent);
-
-                // Android 5.0+ 设置通知颜色
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                    builder.setColor(statusColor);
-                }
-
-                notification = builder.build();
-                Log.d(TAG, "使用标准布局创建通知成功");
-            }
-
-            return notification;
+            Log.d(TAG, "创建通知: isConnected=" + isConnected + ", action=" + buttonText);
+            return builder.build();
         } catch (Exception e) {
             Log.e(TAG, "创建通知失败: " + e.getMessage(), e);
             return null;
@@ -340,7 +261,7 @@ public class VntNotificationService extends Service {
     }
 
     /**
-     * 更新通知：已连接时重新进入前台常驻，未连接时降级为可划掉的普通通知
+     * 更新通知（沿用服务内当前状态）
      */
     private void updateNotification() {
         updateNotification(0);
@@ -361,18 +282,13 @@ public class VntNotificationService extends Service {
                 Log.i(TAG, "丢弃过期的通知绘制: version=" + version + ", current=" + stateVersion);
                 return;
             }
-            if (isConnected) {
-                try {
-                    startForeground(NOTIFICATION_ID, notification);
-                } catch (Exception e) {
-                    // Android 12+ 后台状态下调回前台可能被系统拒绝，
-                    // 降级为普通通知（VPN 连接本身不受影响）
-                    Log.w(TAG, "startForeground 失败，降级为普通通知: " + e.getMessage());
-                    detachForeground();
-                    notificationManager.notify(NOTIFICATION_ID, notification);
-                }
-            } else {
-                detachForeground();
+            // 始终用 startForeground 更新：同一个通知 id 在前台通知与普通通知之间来回切换
+            // （stopForeground(DETACH) + notify）会让部分 ROM 不再刷新内容，表现为"状态不变"
+            try {
+                startForeground(NOTIFICATION_ID, notification);
+            } catch (Exception e) {
+                // Android 12+ 后台状态下可能被系统拒绝，降级为普通通知（VPN 连接本身不受影响）
+                Log.w(TAG, "startForeground 失败，降级为普通通知: " + e.getMessage());
                 notificationManager.notify(NOTIFICATION_ID, notification);
             }
             Log.i(TAG, "通知已更新: isConnected=" + isConnected + ", configName=" + configName);

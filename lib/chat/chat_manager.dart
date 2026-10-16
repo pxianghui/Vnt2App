@@ -493,7 +493,10 @@ class ChatManager extends ChangeNotifier implements ChatNetworkDelegate {
 
   Future<void> syncConnections() async {
     final activeKeys = <String>{};
-    for (final entry in vntManager.map.entries) {
+    // 循环体内存在 await，期间 vntManager.map 可能被 removeAll() 清空，
+    // 直接遍历 live map 会抛 ConcurrentModificationException
+    final entries = vntManager.map.entries.toList();
+    for (final entry in entries) {
       final box = entry.value;
       if (box.isClosed()) {
         continue;

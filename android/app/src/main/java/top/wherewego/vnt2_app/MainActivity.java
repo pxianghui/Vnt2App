@@ -105,8 +105,11 @@ public class MainActivity extends FlutterActivity {
 
     @Override
     protected void onDestroy() {
-        super.onDestroy();
+        // 先停 VPN 再销毁 Flutter 引擎：stopVpn() 内部的 stopVnt() 是发往 Dart 的异步调用，
+        // 若先执行 super.onDestroy() 销毁引擎，该调用会丢，Rust 侧残留的 tun fd 和线程不会被释放。
+        // 通知服务已设 stopWithTask=false，划掉任务后进程仍在，这里必须真正断干净。
         MyVpnService.stopVpn();
+        super.onDestroy();
     }
 
     @Override

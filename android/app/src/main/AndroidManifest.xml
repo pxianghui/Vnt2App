@@ -46,10 +46,13 @@
             </intent-filter>
         </service>
         <!-- 常驻通知服务 -->
+        <!-- stopWithTask=false：用户从最近任务划掉应用时不停掉本服务。
+             否则服务被停、进程被杀，常驻通知会一并消失（表现为"通知会丢"） -->
         <service
             android:name=".VntNotificationService"
             android:enabled="true"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
