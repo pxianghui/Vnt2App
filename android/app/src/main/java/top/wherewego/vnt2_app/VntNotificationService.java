@@ -39,6 +39,11 @@ public class VntNotificationService extends Service {
     // 通知动作
     private static final String ACTION_TOGGLE = "top.wherewego.vnt2_app.NOTIFICATION_TOGGLE";
     private static final String ACTION_UPDATE = "top.wherewego.vnt2_app.NOTIFICATION_UPDATE";
+    private static final String ACTION_DISMISS = "top.wherewego.vnt2_app.NOTIFICATION_DISMISS";
+
+    // 只有 Flyme 会把"不重要通知"收进收纳分组、且之后不再重建那一行（表现为连接状态真的
+    // 变了、通知显示却不变）。其它 ROM 更新通知是正常的，不需要"移除再发布"那一下闪烁。
+    private static final boolean FORCE_REPOST_ON_CHANGE = isFlyme();
 
     // SharedPreferences 相关
     private static final String PREFS_NAME = "FlutterSharedPreferences";
@@ -121,6 +126,22 @@ public class VntNotificationService extends Service {
             return START_STICKY;
         }
 
+        // 用户划掉了未连接状态的通知：移除通知并停止服务，不再重新弹出
+        if (intent != null && ACTION_DISMISS.equals(intent.getAction())) {
+            Log.i(TAG, "通知被划掉，停止通知服务");
+            synchronized (this) {
+                isConnected = false;
+                lastKnownConnected = false;
+                lastPaintedConnected = null;
+            }
+            detachForeground();
+            if (notificationManager != null) {
+                notificationManager.cancel(NOTIFICATION_ID);
+            }
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
         // 如果 Flutter 已初始化，获取当前连接状态
         if (FlutterMethodChannel.initialized()) {
             updateNotificationFromFlutter();
@@ -133,6 +154,11 @@ public class VntNotificationService extends Service {
     public void onDestroy() {
         super.onDestroy();
         Log.i(TAG, "VntNotificationService 销毁");
+
+        // 未连接时通知已降级为可划掉的普通通知，服务销毁后手动清理，避免残留
+        if (!isConnected && notificationManager != null) {
+            notificationManager.cancel(NOTIFICATION_ID);
+        }
 
         // 清除静态实例（保留 lastKnown* 缓存，供 Service 重建时恢复状态）
         instance = null;
@@ -151,6 +177,39 @@ public class VntNotificationService extends Service {
     @Override
     public IBinder onBind(Intent intent) {
         return null;
+    }
+
+    /**
+     * 是否 Flyme（魅族）ROM。只有它需要"移除再发布"来逼通知栏重建收纳分组里的那一行。
+     */
+    private static boolean isFlyme() {
+        String info = (Build.MANUFACTURER + " " + Build.BRAND + " " + Build.PRODUCT + " " + Build.DISPLAY)
+            .toLowerCase();
+        return info.contains("meizu") || info.contains("mblu") || info.contains("flyme");
+    }
+
+    /**
+     * 退出前台状态但保留通知：通知从"不可划掉"变为普通可划掉通知。
+     * 已连接时不调用，保持常驻。
+     */
+    private void detachForeground() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(Service.STOP_FOREGROUND_DETACH);
+        } else {
+            stopForeground(false);
+        }
+    }
+
+    /**
+     * 彻底移除前台通知（随后会立即重新发布）。把通知当作一条新通知发布，
+     * 迫使通知栏重建"不重要通知/收纳"分组里的那一行。
+     */
+    private void removeForegroundNotification() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(Service.STOP_FOREGROUND_REMOVE);
+        } else {
+            stopForeground(true);
+        }
     }
 
     /**
@@ -210,6 +269,16 @@ public class VntNotificationService extends Service {
                 pendingIntentFlags
             );
 
+            // 划掉通知时的回调：未连接状态允许划掉，划掉后停止服务，避免再次弹出
+            Intent dismissIntent = new Intent(this, VntNotificationService.class);
+            dismissIntent.setAction(ACTION_DISMISS);
+            PendingIntent dismissPendingIntent = PendingIntent.getService(
+                this,
+                2,  // requestCode=2 用于划掉通知，避免与其他 PendingIntent 冲突
+                dismissIntent,
+                pendingIntentFlags
+            );
+
             Log.d(TAG, "创建 PendingIntent: 使用 getService() 方式，action=" + ACTION_TOGGLE);
 
             // 状态文本
@@ -236,7 +305,8 @@ public class VntNotificationService extends Service {
                 .setContentIntent(contentIntent)
                 .setCustomContentView(notificationLayout) // 使用自定义布局
                 .setStyle(new NotificationCompat.DecoratedCustomViewStyle()) // 使用装饰样式
-                .setOngoing(true) // 常驻，不可划掉
+                .setOngoing(isConnected) // 已连接时常驻不可划掉；未连接可划掉
+                .setDeleteIntent(dismissPendingIntent) // 划掉后停止服务，避免再次弹出
                 .setPriority(NotificationCompat.PRIORITY_DEFAULT) // 与渠道 importance 保持一致
                 .setSilent(true) // 保持静音，避免状态更新时响铃
                 .setOnlyAlertOnce(true) // 同一通知只提醒一次
@@ -297,32 +367,35 @@ public class VntNotificationService extends Service {
                 Log.i(TAG, "丢弃过期的通知绘制: version=" + version + ", current=" + stateVersion);
                 return;
             }
-            // Flyme 等 ROM 会把"不重要通知"收进收纳分组，且不会重建已折叠的那一行，
-            // 表现为"连接状态真的变了，但通知显示不变"。状态确实变化时先移除再重新发布，
-            // 让通知栏把它当成一条新通知重建（代价：通知会闪一下）
-            if (version != 0
+            // 状态是否真的变化：用于判断要不要"移除再发布"来逼通知栏重建那一行
+            boolean changed = version != 0
                 && (lastPaintedConnected == null
                     || lastPaintedConnected != isConnected
-                    || !configName.equals(lastPaintedConfigName))) {
+                    || !configName.equals(lastPaintedConfigName));
+            if (changed && FORCE_REPOST_ON_CHANGE) {
                 Log.i(TAG, "状态变化，强制重发通知以触发通知栏重建");
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    stopForeground(Service.STOP_FOREGROUND_REMOVE);
-                } else {
-                    stopForeground(true);
-                }
+                removeForegroundNotification();
             }
 
-            // 始终用 startForeground 更新：同一个通知 id 在前台通知与普通通知之间来回切换
-            // （stopForeground(DETACH) + notify）会让部分 ROM 不再刷新内容，表现为"状态不变"
-            try {
-                startForeground(NOTIFICATION_ID, notification);
-                lastPaintedConnected = isConnected;
-                lastPaintedConfigName = configName;
-            } catch (Exception e) {
-                // Android 12+ 后台状态下可能被系统拒绝，降级为普通通知（VPN 连接本身不受影响）
-                Log.w(TAG, "startForeground 失败，降级为普通通知: " + e.getMessage());
+            if (isConnected) {
+                // 已连接：常驻的前台服务通知，不可划掉
+                try {
+                    startForeground(NOTIFICATION_ID, notification);
+                } catch (Exception e) {
+                    // Android 12+ 后台状态下调回前台可能被系统拒绝，
+                    // 降级为普通通知（VPN 连接本身不受影响）
+                    Log.w(TAG, "startForeground 失败，降级为普通通知: " + e.getMessage());
+                    notificationManager.notify(NOTIFICATION_ID, notification);
+                }
+            } else {
+                // 未连接：退出前台状态，通知降级为可划掉的普通通知
+                if (!changed || !FORCE_REPOST_ON_CHANGE) {
+                    detachForeground();
+                }
                 notificationManager.notify(NOTIFICATION_ID, notification);
             }
+            lastPaintedConnected = isConnected;
+            lastPaintedConfigName = configName;
             Log.i(TAG, "通知已更新: isConnected=" + isConnected + ", configName=" + configName);
         } catch (Exception e) {
             Log.e(TAG, "更新通知失败: " + e.getMessage(), e);
