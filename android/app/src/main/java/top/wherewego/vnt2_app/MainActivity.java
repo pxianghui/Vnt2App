@@ -90,8 +90,12 @@ public class MainActivity extends FlutterActivity {
     private void startNotificationService() {
         try {
             Intent serviceIntent = new Intent(this, VntNotificationService.class);
-            // 通知服务不再进入前台，用 startService 即可
-            startService(serviceIntent);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                // Android 8.0+ 使用 startForegroundService
+                startForegroundService(serviceIntent);
+            } else {
+                startService(serviceIntent);
+            }
             Log.d(TAG, "常驻通知服务已启动");
         } catch (Exception e) {
             Log.e(TAG, "启动通知服务失败: " + e.getMessage(), e);
