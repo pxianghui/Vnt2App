@@ -15,6 +15,7 @@ import android.graphics.BitmapFactory;
 import android.os.Build;
 import android.os.IBinder;
 import android.util.Log;
+import android.widget.RemoteViews;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
@@ -56,6 +57,10 @@ public class VntNotificationService extends Service {
     private NotificationManager notificationManager;
     private boolean isConnected = false;
     private String configName = "默认配置";
+    // 上一次真正下发到通知栏的状态：用于判断状态是否真的变化，
+    // 变化时强制重发通知，好让 Flyme 等 ROM 在"收纳/不重要通知"分组里重建那一行
+    private Boolean lastPaintedConnected = null;
+    private String lastPaintedConfigName = null;
 
     @Override
     public void onCreate() {
@@ -85,6 +90,8 @@ public class VntNotificationService extends Service {
             Notification notification = buildNotification();
             if (notification != null) {
                 startForeground(NOTIFICATION_ID, notification);
+                lastPaintedConnected = isConnected;
+                lastPaintedConfigName = configName;
                 Log.i(TAG, "前台服务启动成功: isConnected=" + isConnected);
             } else {
                 Log.e(TAG, "通知创建失败，无法启动前台服务");
@@ -211,13 +218,24 @@ public class VntNotificationService extends Service {
             int statusColor = isConnected ? 0xFF4CAF50 : 0xFFF44336; // 绿色或红色
             String buttonText = isConnected ? "断开" : "连接";
 
-            // 统一使用系统标准通知：内容由 SystemUI 渲染，折叠态/收纳态都能正确显示，
-            // 也不会出现自定义 RemoteViews 在反复更新后不再刷新的问题（"点击后显示不变"）
+            // 自定义布局：连接/断开按钮内嵌在通知里，折叠态下也直接可见可点
+            RemoteViews notificationLayout = new RemoteViews(getPackageName(), R.layout.notification_layout);
+            notificationLayout.setTextViewText(R.id.notification_status, statusText);
+            notificationLayout.setTextColor(R.id.notification_status, statusColor);
+            notificationLayout.setTextViewText(R.id.notification_description, description);
+            notificationLayout.setTextColor(R.id.notification_description, 0xFF1565C0); // 深蓝色
+            int buttonBackground = isConnected
+                ? R.drawable.notification_button_connected
+                : R.drawable.notification_button_disconnected;
+            notificationLayout.setTextViewText(R.id.notification_button, buttonText);
+            notificationLayout.setInt(R.id.notification_button, "setBackgroundResource", buttonBackground);
+            notificationLayout.setOnClickPendingIntent(R.id.notification_button, togglePendingIntent);
+
             NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_icon) // 状态栏图标（使用专门的通知图标）
-                .setContentTitle("VNT2 - " + statusText)
-                .setContentText(description)
                 .setContentIntent(contentIntent)
+                .setCustomContentView(notificationLayout) // 使用自定义布局
+                .setStyle(new NotificationCompat.DecoratedCustomViewStyle()) // 使用装饰样式
                 .setOngoing(true) // 常驻，不可划掉
                 .setPriority(NotificationCompat.PRIORITY_DEFAULT) // 与渠道 importance 保持一致
                 .setSilent(true) // 保持静音，避免状态更新时响铃
@@ -229,9 +247,6 @@ public class VntNotificationService extends Service {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                 builder.setColor(statusColor);
             }
-
-            // 连接/断开按钮：由 SystemUI 渲染，折叠与展开态都可用
-            builder.addAction(R.drawable.ic_stat_icon, buttonText, togglePendingIntent);
 
             Log.d(TAG, "创建通知: isConnected=" + isConnected + ", action=" + buttonText);
             return builder.build();
@@ -282,10 +297,27 @@ public class VntNotificationService extends Service {
                 Log.i(TAG, "丢弃过期的通知绘制: version=" + version + ", current=" + stateVersion);
                 return;
             }
+            // Flyme 等 ROM 会把"不重要通知"收进收纳分组，且不会重建已折叠的那一行，
+            // 表现为"连接状态真的变了，但通知显示不变"。状态确实变化时先移除再重新发布，
+            // 让通知栏把它当成一条新通知重建（代价：通知会闪一下）
+            if (version != 0
+                && (lastPaintedConnected == null
+                    || lastPaintedConnected != isConnected
+                    || !configName.equals(lastPaintedConfigName))) {
+                Log.i(TAG, "状态变化，强制重发通知以触发通知栏重建");
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    stopForeground(Service.STOP_FOREGROUND_REMOVE);
+                } else {
+                    stopForeground(true);
+                }
+            }
+
             // 始终用 startForeground 更新：同一个通知 id 在前台通知与普通通知之间来回切换
             // （stopForeground(DETACH) + notify）会让部分 ROM 不再刷新内容，表现为"状态不变"
             try {
                 startForeground(NOTIFICATION_ID, notification);
+                lastPaintedConnected = isConnected;
+                lastPaintedConfigName = configName;
             } catch (Exception e) {
                 // Android 12+ 后台状态下可能被系统拒绝，降级为普通通知（VPN 连接本身不受影响）
                 Log.w(TAG, "startForeground 失败，降级为普通通知: " + e.getMessage());
