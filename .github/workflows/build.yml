@@ -179,8 +179,7 @@ jobs:
         run: |
           flutter doctor -v
           flutter precache --windows
-          # 下载 patch 文件
-          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/wanghlstar/VntApp/flutter/.github/patches/windows-x64-release.zip" -OutFile ".github/patches/windows-x64-release.zip"
+          # patch 文件已随仓库分发（.github/patches/windows-x64-release.zip），不再联网下载
           
           Expand-Archive -Path ".github/patches/windows-x64-release.zip" -DestinationPath "windows-x64-release"
           
