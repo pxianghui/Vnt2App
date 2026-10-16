@@ -24,8 +24,8 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 /**
- * VNT2 常驻通知服务
- * 提供不可移除的常驻通知，显示连接状态并支持快速切换
+ * VNT2 通知服务
+ * 显示连接状态并支持快速切换
  */
 public class VntNotificationService extends Service {
     private static final String TAG = "VntNotificationService";
@@ -84,32 +84,33 @@ public class VntNotificationService extends Service {
         loadConfigName();
 
         // 恢复到上次已知的连接状态：避免进程被杀重建后误显示"未连接"，
-        // 也避免 startForeground 阶段就用默认 false 值弹通知
+        // 也避免首次发布通知时就用默认 false 值
         isConnected = lastKnownConnected;
         if (lastKnownConfigName != null && !lastKnownConfigName.isEmpty()) {
             configName = lastKnownConfigName;
         }
 
-        // 启动前台服务（添加错误处理）
+        // 发布通知（不再走前台服务：前台服务通知会被 ROM 归入"常驻/置顶"分组，
+        // 与其它常驻通知在同一分组里互相重叠压住）
         try {
             Notification notification = buildNotification();
             if (notification != null) {
-                startForeground(NOTIFICATION_ID, notification);
+                notificationManager.notify(NOTIFICATION_ID, notification);
                 lastPaintedConnected = isConnected;
                 lastPaintedConfigName = configName;
-                Log.i(TAG, "前台服务启动成功: isConnected=" + isConnected);
+                Log.i(TAG, "通知已发布: isConnected=" + isConnected);
             } else {
-                Log.e(TAG, "通知创建失败，无法启动前台服务");
-                // 如果通知创建失败，停止服务避免ANR
+                Log.e(TAG, "通知创建失败");
+                // 如果通知创建失败，停止服务避免残留
                 stopSelf();
             }
         } catch (Exception e) {
-            Log.e(TAG, "启动前台服务失败: " + e.getMessage(), e);
+            Log.e(TAG, "发布通知失败: " + e.getMessage(), e);
             // 捕获异常，避免崩溃
             stopSelf();
         }
 
-        // Flutter 已初始化时异步校正一次状态（不阻塞前台服务启动）
+        // Flutter 已初始化时异步校正一次状态（不阻塞通知发布）
         if (FlutterMethodChannel.initialized()) {
             updateNotificationFromFlutter();
         }
@@ -126,15 +127,16 @@ public class VntNotificationService extends Service {
             return START_STICKY;
         }
 
-        // 用户划掉了未连接状态的通知：移除通知并停止服务，不再重新弹出
+        // 用户划掉了通知：移除通知并停止服务，不再重新弹出
         if (intent != null && ACTION_DISMISS.equals(intent.getAction())) {
             Log.i(TAG, "通知被划掉，停止通知服务");
             synchronized (this) {
-                isConnected = false;
-                lastKnownConnected = false;
-                lastPaintedConnected = null;
+                if (!isConnected) {
+                    // 仅未连接时清缓存：已连接状态下划掉只是收起通知，真实状态仍然有效
+                    lastKnownConnected = false;
+                    lastPaintedConnected = null;
+                }
             }
-            detachForeground();
             if (notificationManager != null) {
                 notificationManager.cancel(NOTIFICATION_ID);
             }
@@ -186,30 +188,6 @@ public class VntNotificationService extends Service {
         String info = (Build.MANUFACTURER + " " + Build.BRAND + " " + Build.PRODUCT + " " + Build.DISPLAY)
             .toLowerCase();
         return info.contains("meizu") || info.contains("mblu") || info.contains("flyme");
-    }
-
-    /**
-     * 退出前台状态但保留通知：通知从"不可划掉"变为普通可划掉通知。
-     * 已连接时不调用，保持常驻。
-     */
-    private void detachForeground() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(Service.STOP_FOREGROUND_DETACH);
-        } else {
-            stopForeground(false);
-        }
-    }
-
-    /**
-     * 彻底移除前台通知（随后会立即重新发布）。把通知当作一条新通知发布，
-     * 迫使通知栏重建"不重要通知/收纳"分组里的那一行。
-     */
-    private void removeForegroundNotification() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(Service.STOP_FOREGROUND_REMOVE);
-        } else {
-            stopForeground(true);
-        }
     }
 
     /**
@@ -305,7 +283,7 @@ public class VntNotificationService extends Service {
                 .setContentIntent(contentIntent)
                 .setCustomContentView(notificationLayout) // 使用自定义布局
                 .setStyle(new NotificationCompat.DecoratedCustomViewStyle()) // 使用装饰样式
-                .setOngoing(isConnected) // 已连接时常驻不可划掉；未连接可划掉
+                // 不设 setOngoing：常驻标记会被 ROM 归入"置顶"分组，与其它常驻通知重叠
                 .setDeleteIntent(dismissPendingIntent) // 划掉后停止服务，避免再次弹出
                 .setPriority(NotificationCompat.PRIORITY_DEFAULT) // 与渠道 importance 保持一致
                 .setSilent(true) // 保持静音，避免状态更新时响铃
@@ -374,26 +352,10 @@ public class VntNotificationService extends Service {
                     || !configName.equals(lastPaintedConfigName));
             if (changed && FORCE_REPOST_ON_CHANGE) {
                 Log.i(TAG, "状态变化，强制重发通知以触发通知栏重建");
-                removeForegroundNotification();
+                notificationManager.cancel(NOTIFICATION_ID);
             }
 
-            if (isConnected) {
-                // 已连接：常驻的前台服务通知，不可划掉
-                try {
-                    startForeground(NOTIFICATION_ID, notification);
-                } catch (Exception e) {
-                    // Android 12+ 后台状态下调回前台可能被系统拒绝，
-                    // 降级为普通通知（VPN 连接本身不受影响）
-                    Log.w(TAG, "startForeground 失败，降级为普通通知: " + e.getMessage());
-                    notificationManager.notify(NOTIFICATION_ID, notification);
-                }
-            } else {
-                // 未连接：退出前台状态，通知降级为可划掉的普通通知
-                if (!changed || !FORCE_REPOST_ON_CHANGE) {
-                    detachForeground();
-                }
-                notificationManager.notify(NOTIFICATION_ID, notification);
-            }
+            notificationManager.notify(NOTIFICATION_ID, notification);
             lastPaintedConnected = isConnected;
             lastPaintedConfigName = configName;
             Log.i(TAG, "通知已更新: isConnected=" + isConnected + ", configName=" + configName);
@@ -553,11 +515,7 @@ public class VntNotificationService extends Service {
                 }
                 Log.w(TAG, "Service 实例不存在，仅缓存状态并尝试启动 Service: isConnected=" + isConnected);
                 Intent serviceIntent = new Intent(context, VntNotificationService.class);
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(serviceIntent);
-                } else {
-                    context.startService(serviceIntent);
-                }
+                context.startService(serviceIntent);
                 return;
             }
 
